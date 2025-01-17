@@ -1,0 +1,167 @@
+/*
+Copyright (c) 2025 hprombex
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+OR OTHER DEALINGS IN THE SOFTWARE.
+
+Author: hprombex
+
+HEIC Converter for converting .HEIC images to other formats like JPEG or PNG
+*/
+
+package main
+
+import (
+	"bytes"
+	"flag"
+	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/strukturag/libheif/go/heif"
+)
+
+// Saves an image as a JPEG file with the specified quality and filename.
+func saveJPEG(img image.Image, filename string, quality int) {
+	var out bytes.Buffer
+	opts := &jpeg.Options{Quality: quality}
+	if err := jpeg.Encode(&out, img, opts); err != nil {
+		fmt.Printf("Could not encode image as JPEG: %s\n", err)
+	} else {
+		if err := os.WriteFile(filename, out.Bytes(), 0644); err != nil {
+			fmt.Printf("Could not save JPEG image as %s: %s\n", filename, err)
+		} else {
+			fmt.Printf("HEIC image saved as %s\n", filename)
+		}
+	}
+}
+
+// Saves an image as a PNG file with the specified filename.
+func savePNG(img image.Image, filename string) {
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		fmt.Printf("Could not encode image as PNG: %s\n", err)
+	} else {
+		if err := os.WriteFile(filename, out.Bytes(), 0644); err != nil {
+			fmt.Printf("Could not save PNG image as %s: %s\n", filename, err)
+		} else {
+			fmt.Printf("HEIC image saved as %s\n", filename)
+		}
+	}
+}
+
+// Converts a HEIC file to JPEG or PNG and optionally deletes the original.
+func convertHeic(filename string, outputPath string, format string, quality int, deleteOriginal bool) {
+	fmt.Printf("Conversion file: %s\n", filename)
+	c, err := heif.NewContext()
+	if err != nil {
+		fmt.Printf("Could not create context: %s\n", err)
+		return
+	}
+
+	if err := c.ReadFromFile(filename); err != nil {
+		fmt.Printf("Could not read file %s: %s\n", filename, err)
+		return
+	}
+
+	handle, err := c.GetPrimaryImageHandle()
+	if err != nil {
+		fmt.Printf("Could not get primary image: %s\n", err)
+		return
+	}
+
+	fmt.Printf("HEIC image size: %v × %v\n", handle.GetWidth(), handle.GetHeight())
+
+	img, err := handle.DecodeImage(heif.ColorspaceUndefined, heif.ChromaUndefined, nil)
+	if err != nil {
+		fmt.Printf("Could not decode image: %s\n", err)
+	} else if i, err := img.GetImage(); err != nil {
+		fmt.Printf("Could not get image: %s\n", err)
+	} else {
+		fmt.Printf("Rectangle: %v\n", i.Bounds())
+		outFilename := strings.Replace(filename, ".", "_", 1)
+
+		switch format {
+		case "jpeg":
+			saveJPEG(i, outFilename+".jpg", quality)
+		case "png":
+			savePNG(i, outFilename+".png")
+		default:
+			fmt.Printf("Unsupported format: %s\n", format)
+			return
+		}
+	}
+
+	if deleteOriginal {
+		if err := os.Remove(filename); err != nil {
+			fmt.Printf("Failed to delete original file %s: %v", filename, err)
+		} else {
+			fmt.Printf("Deleted original file: %s", filename)
+		}
+	}
+}
+
+// Finds all HEIC files in a directory and returns their paths.
+func FindHeicFiles(directory string) ([]string, error) {
+	var heicFiles []string
+	err := filepath.Walk(directory, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if filepath.Ext(strings.ToLower(info.Name())) == ".heic" {
+			heicFiles = append(heicFiles, path)
+		}
+		return nil
+	})
+	return heicFiles, err
+}
+
+func main() {
+	inputFile := flag.String("input_file", "", "Path to a single .HEIC file to be converted.")
+	inputDir := flag.String("input_dir", "", "Path to a directory containing .HEIC files.")
+	outputPath := flag.String("output_path", "", "Path to the output file or directory.")
+	deleteOriginal := flag.Bool("delete", false, "Delete the original file after conversion.")
+	format := flag.String("format", "jpeg", "Output image format (jpeg or png).")
+	quality := flag.Int("quality", 80, "Quality of the output image (1-100).")
+
+	flag.Parse()
+
+	if *inputFile != "" {
+		if _, err := os.Stat(*inputFile); os.IsNotExist(err) {
+			fmt.Printf("Input file '%s' does not exist.", *inputFile)
+		}
+		convertHeic(*inputFile, *outputPath, *format, *quality, *deleteOriginal)
+	} else if *inputDir != "" {
+		if _, err := os.Stat(*inputDir); os.IsNotExist(err) {
+			fmt.Printf("Input directory '%s' does not exist.", *inputDir)
+		}
+		files, err := FindHeicFiles(*inputDir)
+		if err != nil {
+			fmt.Printf("Error finding HEIC files: %v", err)
+		}
+		for _, file := range files {
+			convertHeic(file, *outputPath, *format, *quality, *deleteOriginal)
+		}
+	} else {
+		fmt.Printf("Either --input_file or --input_dir must be specified.")
+	}
+}
