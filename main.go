@@ -35,7 +35,9 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/strukturag/libheif/go/heif"
 )
@@ -70,16 +72,17 @@ func savePNG(img image.Image, filename string) {
 }
 
 // Converts a HEIC file to JPEG or PNG and optionally deletes the original.
-func convertHeic(filename string, outputPath string, format string, quality int, deleteOriginal bool) {
-	fmt.Printf("Conversion file: %s\n", filename)
+func convertHeic(file string, outputPath string, format string, quality int, deleteOriginal bool, wg *sync.WaitGroup, done chan struct{}) {
+	defer wg.Done()
+
 	c, err := heif.NewContext()
 	if err != nil {
 		fmt.Printf("Could not create context: %s\n", err)
 		return
 	}
 
-	if err := c.ReadFromFile(filename); err != nil {
-		fmt.Printf("Could not read file %s: %s\n", filename, err)
+	if err := c.ReadFromFile(file); err != nil {
+		fmt.Printf("Could not read file %s: %s\n", file, err)
 		return
 	}
 
@@ -89,22 +92,24 @@ func convertHeic(filename string, outputPath string, format string, quality int,
 		return
 	}
 
-	fmt.Printf("HEIC image size: %v × %v\n", handle.GetWidth(), handle.GetHeight())
-
+	fmt.Printf("Converting file: %s image size: %v × %v\n", file, handle.GetWidth(), handle.GetHeight())
 	img, err := handle.DecodeImage(heif.ColorspaceUndefined, heif.ChromaUndefined, nil)
 	if err != nil {
 		fmt.Printf("Could not decode image: %s\n", err)
 	} else if i, err := img.GetImage(); err != nil {
 		fmt.Printf("Could not get image: %s\n", err)
 	} else {
-		fmt.Printf("Rectangle: %v\n", i.Bounds())
-		outFilename := strings.Replace(filename, ".", "_", 1)
+		outFilename := strings.Replace(file, ".", "_", 1)
+		if outputPath != "" {
+			filename := filepath.Base(file)
+			outFilename = outputPath + strings.Replace(filename, ".", "_", 1)
+		}
 
 		switch format {
 		case "jpeg":
-			saveJPEG(i, outFilename+".jpg", quality)
+			saveJPEG(i, outFilename + ".jpg", quality)
 		case "png":
-			savePNG(i, outFilename+".png")
+			savePNG(i, outFilename + ".png")
 		default:
 			fmt.Printf("Unsupported format: %s\n", format)
 			return
@@ -112,12 +117,13 @@ func convertHeic(filename string, outputPath string, format string, quality int,
 	}
 
 	if deleteOriginal {
-		if err := os.Remove(filename); err != nil {
-			fmt.Printf("Failed to delete original file %s: %v", filename, err)
+		if err := os.Remove(file); err != nil {
+			fmt.Printf("Failed to delete original file %s: %v", file, err)
 		} else {
-			fmt.Printf("Deleted original file: %s", filename)
+			fmt.Printf("Deleted original file: %s", file)
 		}
 	}
+	<-done
 }
 
 // Finds all HEIC files in a directory and returns their paths.
@@ -145,11 +151,19 @@ func main() {
 
 	flag.Parse()
 
+	numCPUs := runtime.NumCPU()
+	fmt.Printf("Number of CPUs: %d\n", numCPUs)
+
+	done := make(chan struct{}, numCPUs)
+	var wg sync.WaitGroup
+
 	if *inputFile != "" {
 		if _, err := os.Stat(*inputFile); os.IsNotExist(err) {
 			fmt.Printf("Input file '%s' does not exist.", *inputFile)
 		}
-		convertHeic(*inputFile, *outputPath, *format, *quality, *deleteOriginal)
+		wg.Add(1)
+		done <- struct{}{}
+		go convertHeic(*inputFile, *outputPath, *format, *quality, *deleteOriginal, &wg, done)
 	} else if *inputDir != "" {
 		if _, err := os.Stat(*inputDir); os.IsNotExist(err) {
 			fmt.Printf("Input directory '%s' does not exist.", *inputDir)
@@ -159,9 +173,13 @@ func main() {
 			fmt.Printf("Error finding HEIC files: %v", err)
 		}
 		for _, file := range files {
-			convertHeic(file, *outputPath, *format, *quality, *deleteOriginal)
+			wg.Add(1)
+			done <- struct{}{}
+			go convertHeic(file, *outputPath, *format, *quality, *deleteOriginal, &wg, done)
 		}
 	} else {
-		fmt.Printf("Either --input_file or --input_dir must be specified.")
+		fmt.Println("Either --input_file or --input_dir must be specified.")
 	}
+	wg.Wait()
+	fmt.Println("All conversions completed.")
 }
