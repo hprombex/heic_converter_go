@@ -72,8 +72,9 @@ func savePNG(img image.Image, filename string) {
 }
 
 // Converts a HEIC file to JPEG or PNG and optionally deletes the original.
-func convertHeic(file string, outputPath string, format string, quality int, deleteOriginal bool, wg *sync.WaitGroup, done chan struct{}) {
+func convertHeic(file string, outputPath string, format string, quality int, deleteOriginal bool, wg *sync.WaitGroup, start <-chan struct{}, done chan struct{}) {
 	defer wg.Done()
+	<-start // Wait for the start signal for all workers
 
 	c, err := heif.NewContext()
 	if err != nil {
@@ -123,7 +124,8 @@ func convertHeic(file string, outputPath string, format string, quality int, del
 			fmt.Printf("Deleted original file: %s", file)
 		}
 	}
-	<-done
+
+	<-done // Release a slot in the semaphore
 }
 
 // Finds all HEIC files in a directory and returns their paths.
@@ -151,10 +153,11 @@ func main() {
 
 	flag.Parse()
 
-	numCPUs := runtime.NumCPU()
-	fmt.Printf("Number of CPUs: %d\n", numCPUs)
+	NumCPUs := runtime.NumCPU() // Maximum number of goroutines running concurrently
+	fmt.Printf("Number of CPUs: %d\n", NumCPUs)
 
-	done := make(chan struct{}, numCPUs)
+	done := make(chan struct{}, NumCPUs)
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 
 	if *inputFile != "" {
@@ -163,7 +166,7 @@ func main() {
 		}
 		wg.Add(1)
 		done <- struct{}{}
-		go convertHeic(*inputFile, *outputPath, *format, *quality, *deleteOriginal, &wg, done)
+		go convertHeic(*inputFile, *outputPath, *format, *quality, *deleteOriginal, &wg, start, done)
 	} else if *inputDir != "" {
 		if _, err := os.Stat(*inputDir); os.IsNotExist(err) {
 			fmt.Printf("Input directory '%s' does not exist.", *inputDir)
@@ -174,12 +177,17 @@ func main() {
 		}
 		for _, file := range files {
 			wg.Add(1)
-			done <- struct{}{}
-			go convertHeic(file, *outputPath, *format, *quality, *deleteOriginal, &wg, done)
+			go func() {
+				done <- struct{}{} //Reserve a slot in the semaphore
+				convertHeic(file, *outputPath, *format, *quality, *deleteOriginal, &wg, start, done)
+			}()
 		}
 	} else {
 		fmt.Println("Either --input_file or --input_dir must be specified.")
 	}
-	wg.Wait()
+
+	close(start) // Send the start signal to all workers
+	wg.Wait()    // Wait for all workers to finish
+
 	fmt.Println("All conversions completed.")
 }
